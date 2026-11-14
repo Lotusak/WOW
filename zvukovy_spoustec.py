@@ -15,15 +15,44 @@ KEYEVENTF_KEYUP = 0x0002
 ULONG_PTR = wintypes.WPARAM
 
 class KEYBDINPUT(ctypes.Structure):
-    _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD),
-                ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD),
-                ("dwExtraInfo", ULONG_PTR)]
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [
+        ("dx", wintypes.LONG),
+        ("dy", wintypes.LONG),
+        ("mouseData", wintypes.DWORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [
+        ("uMsg", wintypes.DWORD),
+        ("wParamL", wintypes.WORD),
+        ("wParamH", wintypes.WORD),
+    ]
 
 class INPUT_UNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT)]
+    _fields_ = [
+        ("ki", KEYBDINPUT),
+        ("mi", MOUSEINPUT),
+        ("hi", HARDWAREINPUT),
+    ]
 
 class INPUT(ctypes.Structure):
-    _fields_ = [("type", wintypes.DWORD), ("union", INPUT_UNION)]
+    _anonymous_ = ("union",)
+    _fields_ = [
+        ("type", wintypes.DWORD),
+        ("union", INPUT_UNION),
+    ]
 
 VK = {
     "BACKSPACE": 0x08, "TAB": 0x09, "ENTER": 0x0D, "SHIFT": 0x10,
@@ -39,24 +68,66 @@ for c in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
 for c in "0123456789":
     VK[c] = ord(c)
 
-def press_key(name):
-    name = name.strip().upper()
-    if name not in VK:
-        raise ValueError(f"Nepodporovaná klávesa: {name}")
-    code = VK[name]
-    inputs = (INPUT * 2)()
-    inputs[0].type = INPUT_KEYBOARD
-    inputs[0].union.ki = KEYBDINPUT(code, 0, 0, 0, 0)
-    inputs[1].type = INPUT_KEYBOARD
-    inputs[1].union.ki = KEYBDINPUT(code, 0, KEYEVENTF_KEYUP, 0, 0)
-    if ctypes.windll.user32.SendInput(2, ctypes.byref(inputs), ctypes.sizeof(INPUT)) != 2:
+# VkKeyScanExW interprets a typed character using the active Windows layout.
+_MODIFIER_VKS = {1: 0x10, 2: 0x11, 4: 0x12}  # Shift, Ctrl, Alt
+
+def _send_inputs(items):
+    inputs = (INPUT * len(items))()
+    for index, (vk, flags) in enumerate(items):
+        inputs[index].type = INPUT_KEYBOARD
+        inputs[index].ki = KEYBDINPUT(vk, 0, flags, 0, 0)
+    sent = ctypes.windll.user32.SendInput(
+        len(inputs), ctypes.byref(inputs), ctypes.sizeof(INPUT)
+    )
+    if sent != len(inputs):
         raise ctypes.WinError()
+
+def resolve_key(name):
+    """Return (virtual_key, modifiers) for a named key or one typed character."""
+    raw = name.strip()
+    named = raw.upper()
+    if named in VK:
+        return VK[named], []
+    if len(raw) != 1:
+        raise ValueError(
+            f"Nepodporovaná klávesa: {raw}. Zadejte název klávesy "
+            "(např. F8, ENTER) nebo jeden znak podle českého rozložení klávesnice."
+        )
+
+    user32 = ctypes.windll.user32
+    user32.GetKeyboardLayout.argtypes = [wintypes.DWORD]
+    user32.GetKeyboardLayout.restype = wintypes.HKL
+    user32.VkKeyScanExW.argtypes = [ctypes.c_wchar, wintypes.HKL]
+    user32.VkKeyScanExW.restype = ctypes.c_short
+    layout = user32.GetKeyboardLayout(0)
+    mapped = user32.VkKeyScanExW(raw, layout)
+    if mapped == -1:
+        raise ValueError(
+            f"Znak {raw!r} nelze převést podle aktuálního rozložení klávesnice."
+        )
+    vk = mapped & 0xFF
+    shift_state = (mapped >> 8) & 0xFF
+    modifiers = [
+        modifier_vk for bit, modifier_vk in _MODIFIER_VKS.items()
+        if shift_state & bit
+    ]
+    return vk, modifiers
+
+def press_key(name):
+    vk, modifiers = resolve_key(name)
+    events = []
+    for modifier in modifiers:
+        events.append((modifier, 0))
+    events.extend([(vk, 0), (vk, KEYEVENTF_KEYUP)])
+    for modifier in reversed(modifiers):
+        events.append((modifier, KEYEVENTF_KEYUP))
+    _send_inputs(events)
 
 class App:
     def __init__(self, root):
         self.root = root
         root.title("Zvukový spouštěč")
-        root.geometry("390x365")
+        root.geometry("410x430")
         root.resizable(False, False)
         self.events = queue.Queue()
         self.stop_event = threading.Event()
@@ -87,17 +158,30 @@ class App:
         ttk.Spinbox(frm, from_=0, to=2000, increment=50, textvariable=self.delay,
                     width=11).grid(row=4, column=1, sticky="e", pady=4)
 
-        ttk.Separator(frm).grid(row=5, column=0, columnspan=2, sticky="ew", pady=12)
+        self.fallback_enabled = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            frm, text="Použít záložní časovač", variable=self.fallback_enabled
+        ).grid(row=5, column=0, sticky="w", pady=(8, 2))
+        self.fallback_seconds = tk.IntVar(value=5)
+        ttk.Spinbox(
+            frm, from_=1, to=20, increment=1,
+            textvariable=self.fallback_seconds, width=8
+        ).grid(row=5, column=1, sticky="e", pady=(8, 2))
+        ttk.Label(frm, text="Čas v sekundách (1–20); při timeoutu se stiskne druhá klávesa").grid(
+            row=6, column=0, columnspan=2, sticky="w"
+        )
+
+        ttk.Separator(frm).grid(row=7, column=0, columnspan=2, sticky="ew", pady=10)
         self.status = tk.StringVar(value="Zastaveno")
-        ttk.Label(frm, textvariable=self.status, wraplength=350).grid(
-            row=6, column=0, columnspan=2, sticky="w", pady=(0, 10))
+        ttk.Label(frm, textvariable=self.status, wraplength=375).grid(
+            row=8, column=0, columnspan=2, sticky="w", pady=(0, 8))
         self.level = tk.StringVar(value="Aktuální úroveň: —")
-        ttk.Label(frm, textvariable=self.level).grid(row=7, column=0, columnspan=2, sticky="w")
+        ttk.Label(frm, textvariable=self.level).grid(row=9, column=0, columnspan=2, sticky="w")
 
         self.start_btn = ttk.Button(frm, text="Spustit sledování", command=self.start)
-        self.start_btn.grid(row=8, column=0, sticky="ew", pady=14)
+        self.start_btn.grid(row=10, column=0, sticky="ew", pady=12)
         self.stop_btn = ttk.Button(frm, text="Zastavit", command=self.stop, state="disabled")
-        self.stop_btn.grid(row=8, column=1, sticky="ew", padx=(8, 0), pady=14)
+        self.stop_btn.grid(row=10, column=1, sticky="ew", padx=(8, 0), pady=12)
         frm.columnconfigure(0, weight=1)
         frm.columnconfigure(1, weight=1)
 
@@ -106,29 +190,42 @@ class App:
 
     def start(self):
         try:
-            k1, k2 = self.key1.get().strip().upper(), self.key2.get().strip().upper()
-            if k1 not in VK or k2 not in VK:
-                raise ValueError("Použijte např. A–Z, 0–9, F1–F24, ENTER, SPACE, ESC, CTRL, ALT nebo SHIFT.")
+            k1, k2 = self.key1.get().strip(), self.key2.get().strip()
+            if not k1 or not k2:
+                raise ValueError("Vyplňte obě klávesy.")
+            # Validate both entries against the current Windows keyboard layout.
+            resolve_key(k1)
+            resolve_key(k2)
             delay = int(self.delay.get())
             if not 0 <= delay <= 2000:
                 raise ValueError("Prodleva musí být v rozsahu 0 až 2000 ms.")
             threshold = int(self.threshold.get())
+            fallback_enabled = bool(self.fallback_enabled.get())
+            fallback_seconds = int(self.fallback_seconds.get())
+            if not 1 <= fallback_seconds <= 20:
+                raise ValueError("Záložní časovač musí být v rozsahu 1 až 20 sekund.")
         except Exception as e:
             messagebox.showerror("Neplatné nastavení", str(e))
             return
         self.stop_event.clear()
         self.running = True
-        self.worker = threading.Thread(target=self.monitor, args=(threshold, k1, k2, delay), daemon=True)
+        self.worker = threading.Thread(
+            target=self.monitor,
+            args=(threshold, k1, k2, delay, fallback_enabled, fallback_seconds),
+            daemon=True,
+        )
         self.worker.start()
         self.status.set("Sleduji zvukový výstup. Spuštění nastane při překročení hranice.")
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
 
-    def monitor(self, threshold, k1, k2, delay):
+    def monitor(self, threshold, k1, k2, delay, fallback_enabled=False, fallback_seconds=5):
         try:
             speaker = sc.default_speaker()
             mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
             above = False
+            wait_started = time.monotonic()
+            fallback_fired = False
             with mic.recorder(samplerate=48000, channels=2, blocksize=4800) as recorder:
                 while not self.stop_event.is_set():
                     data = recorder.record(numframes=4800)
@@ -136,6 +233,7 @@ class App:
                     level = min(100.0, rms * 100.0)
                     self.events.put(("level", level))
                     is_above = level >= threshold
+
                     if is_above and not above:
                         self.events.put(("status", f"Hranice překročena ({level:.1f} %). Posílám {k1}…"))
                         press_key(k1)
@@ -146,6 +244,20 @@ class App:
                         if not self.stop_event.is_set():
                             press_key(k2)
                             self.events.put(("status", f"Provedeno {k1} → {k2}. Čekám na pokles pod hranici a další překročení."))
+
+                    elif not is_above and above:
+                        # A new fallback waiting period begins after the signal falls below threshold.
+                        wait_started = time.monotonic()
+                        fallback_fired = False
+
+                    elif (not is_above and not above and fallback_enabled
+                          and not fallback_fired
+                          and time.monotonic() - wait_started >= fallback_seconds):
+                        # Fallback deliberately presses only key 2, and only once per waiting cycle.
+                        press_key(k2)
+                        fallback_fired = True
+                        self.events.put(("status", f"Záložní časovač ({fallback_seconds} s): stisknuto {k2}. Čekám na zvukový signál."))
+
                     above = is_above
         except Exception as e:
             self.events.put(("error", str(e)))
