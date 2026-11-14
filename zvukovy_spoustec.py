@@ -138,18 +138,44 @@ class App:
         frm.pack(fill="both", expand=True)
 
         ttk.Label(frm, text="Hranice hlasitosti (%)").grid(row=0, column=0, sticky="w")
-        self.threshold = tk.IntVar(value=50)
-        self.threshold_label = ttk.Label(frm, text="50 %")
-        self.threshold_label.grid(row=0, column=1, sticky="e")
-        scale = ttk.Scale(frm, from_=1, to=100, variable=self.threshold,
-                          command=lambda v: self.threshold_label.config(text=f"{int(float(v))} %"))
+
+        self.threshold = tk.DoubleVar(value=50.0)
+        self.threshold_text = tk.StringVar(value="50,0")
+
+        def update_threshold(value):
+            v = round(float(value), 1)
+            self.threshold_text.set(f"{v:.1f}".replace(".", ","))
+
+        def apply_threshold_text(event=None):
+            try:
+                v = float(self.threshold_text.get().strip().replace(",", "."))
+                if not 1.0 <= v <= 100.0:
+                    raise ValueError
+                v = round(v, 1)
+            except ValueError:
+                v = self.threshold.get()
+            self.threshold.set(v)
+            self.threshold_text.set(f"{v:.1f}".replace(".", ","))
+
+        self.threshold_entry = ttk.Entry(
+            frm, textvariable=self.threshold_text, width=9
+        )
+        self.threshold_entry.grid(row=0, column=1, sticky="e")
+        self.threshold_entry.bind("<FocusOut>", apply_threshold_text)
+        self.threshold_entry.bind("<Return>", apply_threshold_text)
+
+        scale = ttk.Scale(
+            frm, from_=1.0, to=100.0,
+            variable=self.threshold,
+            command=update_threshold
+        )
         scale.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(3, 12))
 
-        ttk.Label(frm, text="První klávesa").grid(row=2, column=0, sticky="w")
+        ttk.Label(frm, text="Klávesa Interakce").grid(row=2, column=0, sticky="w")
         self.key1 = tk.StringVar(value="F8")
         ttk.Entry(frm, textvariable=self.key1, width=14).grid(row=2, column=1, sticky="e", pady=4)
 
-        ttk.Label(frm, text="Druhá klávesa").grid(row=3, column=0, sticky="w")
+        ttk.Label(frm, text="Klávesa Fishing").grid(row=3, column=0, sticky="w")
         self.key2 = tk.StringVar(value="F9")
         ttk.Entry(frm, textvariable=self.key2, width=14).grid(row=3, column=1, sticky="e", pady=4)
 
@@ -160,16 +186,9 @@ class App:
 
         self.fallback_enabled = tk.BooleanVar(value=False)
         ttk.Checkbutton(
-            frm, text="Použít záložní časovač", variable=self.fallback_enabled
-        ).grid(row=5, column=0, sticky="w", pady=(8, 2))
-        self.fallback_seconds = tk.IntVar(value=5)
-        ttk.Spinbox(
-            frm, from_=1, to=20, increment=1,
-            textvariable=self.fallback_seconds, width=8
-        ).grid(row=5, column=1, sticky="e", pady=(8, 2))
-        ttk.Label(frm, text="Čas v sekundách (1–20); při timeoutu se stiskne druhá klávesa").grid(
-            row=6, column=0, columnspan=2, sticky="w"
-        )
+            frm, text="Použít záložní časovač (30 sekund)",
+            variable=self.fallback_enabled
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 2))
 
         ttk.Separator(frm).grid(row=7, column=0, columnspan=2, sticky="ew", pady=10)
         self.status = tk.StringVar(value="Zastaveno")
@@ -199,11 +218,9 @@ class App:
             delay = int(self.delay.get())
             if not 0 <= delay <= 2000:
                 raise ValueError("Prodleva musí být v rozsahu 0 až 2000 ms.")
-            threshold = int(self.threshold.get())
+            threshold = float(self.threshold.get())
             fallback_enabled = bool(self.fallback_enabled.get())
-            fallback_seconds = int(self.fallback_seconds.get())
-            if not 1 <= fallback_seconds <= 20:
-                raise ValueError("Záložní časovač musí být v rozsahu 1 až 20 sekund.")
+            fallback_seconds = 30
         except Exception as e:
             messagebox.showerror("Neplatné nastavení", str(e))
             return
@@ -219,7 +236,7 @@ class App:
         self.start_btn.config(state="disabled")
         self.stop_btn.config(state="normal")
 
-    def monitor(self, threshold, k1, k2, delay, fallback_enabled=False, fallback_seconds=5):
+    def monitor(self, threshold, k1, k2, delay, fallback_enabled=False, fallback_seconds=30):
         try:
             speaker = sc.default_speaker()
             mic = sc.get_microphone(id=str(speaker.name), include_loopback=True)
