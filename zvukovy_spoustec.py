@@ -260,6 +260,7 @@ class App:
                                 time.sleep(0.01)
                         if not self.stop_event.is_set():
                             press_key(k2)
+                            time.sleep(1.0)
                             self.events.put(("status", f"Provedeno {k1} → {k2}. Čekám na pokles pod hranici a další překročení."))
 
                     elif not is_above and above:
